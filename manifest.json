@@ -1,0 +1,11 @@
+{
+	"id": "research-attachment-hub",
+	"name": "Research Attachment Hub",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "A comprehensive research attachment hub for Obsidian with PDF organization, DOI tracking, citation management, and academic paper management",
+	"author": "Your Name",
+	"authorUrl": "https://github.com/yourusername",
+	"fundingUrl": "https://github.com/yourusername",
+	"isDesktopOnly": false
+}
