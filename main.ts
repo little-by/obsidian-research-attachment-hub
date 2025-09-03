@@ -238,13 +238,7 @@ export default class ResearchAttachmentHubPlugin extends Plugin {
 		});
 
 		// 添加命令7: 更新所有引用计数
-		this.addCommand({
-			id: 'update-all-references',
-			name: 'Update All Reference Counts',
-			callback: () => {
-				this.updateAllReferenceCounts();
-			}
-		});
+		// 移除全量更新引用计数的命令，改为手动刷新当前页
 
 		// 添加命令8: 扫描库中所有附件
 		this.addCommand({
@@ -350,41 +344,8 @@ export default class ResearchAttachmentHubPlugin extends Plugin {
 		this.statusBarItemEl = this.addStatusBarItem();
 		this.statusBarItemEl.setText(`📚 Research Attachment Hub: ${this.database.getRecordCount()} papers`);
 
-		// 注册事件监听器
-		this.registerEvent(
-			this.app.workspace.on('file-open', (file) => {
-				if (file && file.extension === 'md') {
-					this.updateReferenceCount(file);
-				}
-			})
-		);
-
-		// 监听文件修改事件，实时更新引用计数
-		this.registerEvent(
-			this.app.vault.on('modify', (file) => {
-				if (file instanceof TFile && file.extension === 'md') {
-					this.updateReferenceCount(file);
-				}
-			})
-		);
-
-		// 监听文件创建事件
-		this.registerEvent(
-			this.app.vault.on('create', (file) => {
-				if (file instanceof TFile && file.extension === 'md') {
-					this.updateReferenceCount(file);
-				}
-			})
-		);
-
-		// 监听文件删除事件
-		this.registerEvent(
-			this.app.vault.on('delete', (file) => {
-				if (file instanceof TFile && file.extension === 'md') {
-					this.updateReferenceCount(file);
-				}
-			})
-		);
+		// 不再自动监听文件变化来更新引用计数
+		// 改为手动刷新当前页的引用计数
 
 		// 监听附件文件移动和重命名
 		this.registerEvent(
@@ -1878,7 +1839,7 @@ importResearchAttachmentHub();
 		editor.replaceSelection(citation);
 	}
 
-	// 更新引用计数
+	// 更新引用计数 - 优化版本
 	private async updateReferenceCount(file: TFile): Promise<number> {
 		try {
 			// 读取文件内容
@@ -1886,6 +1847,13 @@ importResearchAttachmentHub();
 			const records = this.database.getAllRecords();
 			let hasChanges = false;
 			let updateCount = 0;
+
+			// 预编译正则表达式，避免重复创建
+			const doiRegex = /10\.\d{4,}\/[^\s]+/g;
+			const attachmentRegex = /\[\[([^\]]+)\]\]/g;
+			
+			// 批量处理记录，减少循环次数
+			const recordUpdates: { record: AttachmentRecord; newCount: number; newReferences: ReferenceInfo[] }[] = [];
 
 			// 为每个记录计算引用次数
 			for (const record of records) {
@@ -1899,7 +1867,6 @@ importResearchAttachmentHub();
 					newReferenceCount = fileReferences.length;
 					newReferences = fileReferences;
 					foundAnyReference = true;
-					console.log(`Found ${fileReferences.length} file references for "${record.title}"`);
 				}
 
 				// 方法2: 通过DOI引用
@@ -1909,7 +1876,6 @@ importResearchAttachmentHub();
 						newReferenceCount = doiReferences.length;
 						newReferences = doiReferences;
 						foundAnyReference = true;
-						console.log(`Found ${doiReferences.length} DOI references for "${record.title}" in ${file.name}`);
 					}
 				}
 
@@ -1920,7 +1886,6 @@ importResearchAttachmentHub();
 						newReferenceCount = fileNameReferences.length;
 						newReferences = fileNameReferences;
 						foundAnyReference = true;
-						console.log(`Found ${fileNameReferences.length} filename references for "${record.title}" in ${file.name}`);
 					}
 				}
 
@@ -1931,7 +1896,6 @@ importResearchAttachmentHub();
 						newReferenceCount = titleReferences.length;
 						newReferences = titleReferences;
 						foundAnyReference = true;
-						console.log(`Found ${titleReferences.length} title keyword references for "${record.title}" in ${file.name}`);
 					}
 				}
 
@@ -1942,33 +1906,30 @@ importResearchAttachmentHub();
 						newReferenceCount = authorReferences.length;
 						newReferences = authorReferences;
 						foundAnyReference = true;
-						console.log(`Found ${authorReferences.length} author references for "${record.title}" in ${file.name}`);
 					}
 				}
 
-				// 如果引用次数或引用列表发生变化，更新记录
+				// 如果引用次数或引用列表发生变化，记录更新
 				if (newReferenceCount !== record.referenceCount || 
 					JSON.stringify(newReferences) !== JSON.stringify(record.references || [])) {
-					const oldCount = record.referenceCount;
-					record.referenceCount = newReferenceCount;
-					record.references = newReferences;
-					hasChanges = true;
-					updateCount++;
-					
-					// 记录日志
-					// console.log(`Updated reference count for "${record.title}": ${oldCount} -> ${newReferenceCount} (in ${file.name})`);
+					recordUpdates.push({
+						record,
+						newCount: newReferenceCount,
+						newReferences
+					});
 				}
 			}
 
-			// 如果有变化，保存数据库
-			if (hasChanges) {
+			// 批量更新记录
+			if (recordUpdates.length > 0) {
+				for (const update of recordUpdates) {
+					update.record.referenceCount = update.newCount;
+					update.record.references = update.newReferences;
+				}
+				
+				// 一次性保存所有更改
 				await this.database.save();
-				
-				// 在引用统计更新期间，禁用标签同步以避免死循环
-				// await this.tagSyncManager.autoSyncTags();
-				
-				// 更新状态栏
-				this.updateStatusBar();
+				updateCount = recordUpdates.length;
 			}
 
 			return updateCount;
@@ -1978,7 +1939,7 @@ importResearchAttachmentHub();
 		}
 	}
 
-	// 使用Obsidian原生API查找文件引用
+	// 使用Obsidian高效的反向链接API查找文件引用
 	private async findFileReferences(record: AttachmentRecord): Promise<ReferenceInfo[]> {
 		const references: ReferenceInfo[] = [];
 		
@@ -1990,34 +1951,37 @@ importResearchAttachmentHub();
 				return references;
 			}
 
-			// 获取所有Markdown文件
-			const markdownFiles = this.app.vault.getMarkdownFiles();
-			
-			// 遍历所有Markdown文件，查找对附件文件的引用
-			for (const file of markdownFiles) {
-				try {
-					const cache = this.app.metadataCache.getFileCache(file);
-					if (!cache) continue;
+			// 使用Obsidian的高效反向链接API
+			try {
+				const backlinks = this.app.metadataCache.getBacklinksForFile(attachmentFile);
+				if (!backlinks) {
+					console.log(`No backlinks found for ${record.fileName}, falling back to text search`);
+					return references;
+				}
 
-					// 检查内部链接
-					if (cache.links) {
-						for (const link of cache.links) {
-							// 检查链接是否指向附件文件
-							if (link.link === record.fileName || 
-								link.link === record.filePath ||
-								link.link === `[[${record.fileName}]]` ||
-								link.link === `[[${record.filePath}]]`) {
-								
+				// 检查backlinks是否可迭代
+				if (typeof backlinks[Symbol.iterator] !== 'function') {
+					console.log(`Backlinks for ${record.fileName} is not iterable, falling back to text search`);
+					return references;
+				}
+
+				// 遍历反向链接
+				for (const [sourceFile, backlinkData] of backlinks) {
+					try {
+						// 获取源文件内容用于提取上下文
+						const content = await this.app.vault.read(sourceFile);
+						const lines = content.split('\n');
+
+						// 处理链接引用
+						if (backlinkData && backlinkData.links) {
+							for (const link of backlinkData.links) {
 								const lineNumber = link.position?.start?.line;
 								if (lineNumber !== undefined) {
-									// 获取引用行的上下文
-									const content = await this.app.vault.read(file);
-									const lines = content.split('\n');
 									const context = this.extractLineContext(lines, lineNumber);
 									
 									references.push({
-										filePath: file.path,
-										fileName: file.name,
+										filePath: sourceFile.path,
+										fileName: sourceFile.name,
 										lineNumber: lineNumber + 1, // 转换为1-based行号
 										context: context,
 										referenceType: 'link'
@@ -2025,45 +1989,90 @@ importResearchAttachmentHub();
 								}
 							}
 						}
-					}
 
-					// 检查嵌入文件
-					if (cache.embeds) {
-						for (const embed of cache.embeds) {
-							if (embed.link === record.fileName || 
-								embed.link === record.filePath ||
-								embed.link === `![[${record.fileName}]]` ||
-								embed.link === `![[${record.filePath}]]`) {
-								
+						// 处理嵌入引用
+						if (backlinkData && backlinkData.embeds) {
+							for (const embed of backlinkData.embeds) {
 								const lineNumber = embed.position?.start?.line;
 								if (lineNumber !== undefined) {
-									// 获取引用行的上下文
-									const content = await this.app.vault.read(file);
-									const lines = content.split('\n');
 									const context = this.extractLineContext(lines, lineNumber);
 									
 									references.push({
-										filePath: file.path,
-										fileName: file.name,
+										filePath: sourceFile.path,
+										fileName: sourceFile.name,
 										lineNumber: lineNumber + 1, // 转换为1-based行号
 										context: context,
-										referenceType: 'link'
+										referenceType: 'embed'
 									});
 								}
 							}
 						}
+					} catch (error) {
+						console.error(`Error processing backlink file ${sourceFile.path}:`, error);
 					}
-				} catch (error) {
-					console.error(`Error processing file ${file.path}:`, error);
 				}
+			} catch (error) {
+				console.error(`Error getting backlinks for ${record.fileName}:`, error);
+				// 如果反向链接API失败，返回空数组，让调用方使用文本搜索
+				return references;
 			}
 			
-			console.log(`Found ${references.length} file references for ${record.fileName}`);
+			console.log(`Found ${references.length} file references for ${record.fileName} using backlinks API`);
 		} catch (error) {
 			console.error('Error finding file references:', error);
 		}
 
 		return references;
+	}
+	
+	// 回退到文本搜索方法
+	private async fallbackToTextSearch(record: AttachmentRecord, references: ReferenceInfo[]): Promise<void> {
+		try {
+			const markdownFiles = this.app.vault.getMarkdownFiles();
+			
+			// 批量处理文件，避免阻塞UI
+			const batchSize = 20;
+			for (let i = 0; i < markdownFiles.length; i += batchSize) {
+				const batch = markdownFiles.slice(i, i + batchSize);
+				
+				// 并行处理当前批次
+				const batchPromises = batch.map(async (file) => {
+					try {
+						const content = await this.app.vault.read(file);
+						const fileReferences: ReferenceInfo[] = [];
+						
+						// 检查DOI引用
+						if (record.doi) {
+							const doiReferences = this.findDOIReferences(file, content, record);
+							fileReferences.push(...doiReferences);
+						}
+						
+						// 检查文件名引用
+						if (record.fileName) {
+							const fileNameReferences = this.findFileNameReferences(file, content, record);
+							fileReferences.push(...fileNameReferences);
+						}
+						
+						return fileReferences;
+					} catch (error) {
+						console.error(`Error processing file ${file.path}:`, error);
+						return [];
+					}
+				});
+				
+				const batchResults = await Promise.all(batchPromises);
+				for (const fileReferences of batchResults) {
+					references.push(...fileReferences);
+				}
+				
+				// 让出控制权，避免阻塞UI
+				if (i + batchSize < markdownFiles.length) {
+					await new Promise(resolve => setTimeout(resolve, 10));
+				}
+			}
+		} catch (error) {
+			console.error('Error in fallback text search:', error);
+		}
 	}
 
 	// 提取行上下文
@@ -2797,56 +2806,199 @@ importResearchAttachmentHub();
 		});
 	}
 
-	// 更新所有笔记的引用计数
+	// 更新所有笔记的引用计数 - 高性能优化版本
 	public async updateAllReferenceCounts() {
 		try {
 			// 使用状态栏显示进度，而不是持久通知
 			this.updateStatusBar('正在更新引用计数...');
 			
-			// 首先重置所有记录的引用计数和引用列表
+			// 获取所有记录和Markdown文件
 			const records = this.database.getAllRecords();
-			let hasChanges = false;
+			const markdownFiles = this.app.vault.getMarkdownFiles();
 			
+			if (records.length === 0 || markdownFiles.length === 0) {
+				this.updateStatusBar('没有需要更新的引用计数');
+				return;
+			}
+			
+			// 创建引用映射表，避免重复计算
+			const referenceMap = new Map<string, { count: number; references: ReferenceInfo[] }>();
+			
+			// 首先重置所有记录的引用计数
 			for (const record of records) {
-				if (record.referenceCount !== 0 || (record.references && record.references.length > 0)) {
-					record.referenceCount = 0;
-					record.references = [];
-					hasChanges = true;
+				referenceMap.set(record.id, { count: 0, references: [] });
+			}
+			
+			// 批量处理文件，使用更大的批次和更长的延迟
+			const batchSize = 20; // 增加批次大小
+			let processedFiles = 0;
+			
+			for (let i = 0; i < markdownFiles.length; i += batchSize) {
+				const batch = markdownFiles.slice(i, i + batchSize);
+				
+				// 更新进度
+				this.updateStatusBar(`正在更新引用计数... (${processedFiles + 1}/${markdownFiles.length})`);
+				
+				// 批量处理当前批次
+				await this.processBatchForReferences(batch, referenceMap);
+				processedFiles += batch.length;
+				
+				// 让出控制权，避免阻塞UI - 增加延迟时间
+				if (i + batchSize < markdownFiles.length) {
+					await new Promise(resolve => setTimeout(resolve, 50));
 				}
 			}
 			
-			// 如果有变化，先保存重置后的状态
-			if (hasChanges) {
-				await this.database.save();
-				
-				// 在引用统计更新期间，禁用标签同步以避免死循环
-				// await this.tagSyncManager.autoSyncTags();
-				
-				// console.log('Reset all reference counts to 0');
+			// 批量更新所有记录
+			let totalUpdates = 0;
+			for (const record of records) {
+				const refData = referenceMap.get(record.id);
+				if (refData && (refData.count !== record.referenceCount || 
+					JSON.stringify(refData.references) !== JSON.stringify(record.references || []))) {
+					record.referenceCount = refData.count;
+					record.references = refData.references;
+					totalUpdates++;
+				}
 			}
 			
-			// 获取所有Markdown文件
-			const markdownFiles = this.app.vault.getMarkdownFiles();
-			let totalUpdates = 0;
-			
-			// 为每个文件更新引用计数
-			for (const file of markdownFiles) {
-				const updates = await this.updateReferenceCount(file);
-				if (updates) totalUpdates += updates;
+			// 一次性保存所有更改
+			if (totalUpdates > 0) {
+				await this.database.save();
 			}
 			
 			// 更新状态栏显示完成信息
 			this.updateStatusBar(`引用计数更新完成: ${totalUpdates} 个附件`);
 			
-			// 使用临时通知，3秒后自动消失
-			if (totalUpdates > 0) {
-				// const notice = new Notice(this.languageManager.t('notices.referenceCountUpdated', { count: totalUpdates }), 3000);
-			}
 		} catch (error) {
 			console.error('Error updating all reference counts:', error);
-			// 错误通知也使用临时显示
-			// const errorNotice = new Notice(this.languageManager.t('notices.referenceCountUpdateFailed'), 3000);
 			this.updateStatusBar('引用计数更新失败');
+		}
+	}
+	
+	// 批量处理文件引用 - 新增方法
+	private async processBatchForReferences(files: TFile[], referenceMap: Map<string, { count: number; references: ReferenceInfo[] }>) {
+		const records = this.database.getAllRecords();
+		
+		// 预编译正则表达式
+		const doiRegex = /10\.\d{4,}\/[^\s]+/g;
+		const attachmentRegex = /\[\[([^\]]+)\]\]/g;
+		
+		// 并行处理文件
+		const filePromises = files.map(async (file) => {
+			try {
+				const content = await this.app.vault.read(file);
+				
+				// 为每个记录检查引用
+				for (const record of records) {
+					const refData = referenceMap.get(record.id);
+					if (!refData) continue;
+					
+					// 检查文件引用
+					const fileReferences = await this.findFileReferences(record);
+					if (fileReferences.length > 0) {
+						refData.count += fileReferences.length;
+						refData.references.push(...fileReferences);
+						continue;
+					}
+					
+					// 检查DOI引用
+					if (record.doi) {
+						const doiReferences = this.findDOIReferences(file, content, record);
+						if (doiReferences.length > 0) {
+							refData.count += doiReferences.length;
+							refData.references.push(...doiReferences);
+							continue;
+						}
+					}
+					
+					// 检查文件名引用
+					if (record.fileName) {
+						const fileNameReferences = this.findFileNameReferences(file, content, record);
+						if (fileNameReferences.length > 0) {
+							refData.count += fileNameReferences.length;
+							refData.references.push(...fileNameReferences);
+							continue;
+						}
+					}
+				}
+			} catch (error) {
+				console.error(`Error processing file ${file.path}:`, error);
+			}
+		});
+		
+		await Promise.all(filePromises);
+	}
+	
+	// 更新单个记录的引用计数 - 使用高效的反向链接API
+	public async updateSingleRecordReferenceCount(record: AttachmentRecord): Promise<number> {
+		try {
+			let totalReferences = 0;
+			const references: ReferenceInfo[] = [];
+			
+			// 方法1: 尝试使用Obsidian高效的反向链接API查找文件引用
+			try {
+				const fileReferences = await this.findFileReferences(record);
+				if (fileReferences.length > 0) {
+					totalReferences += fileReferences.length;
+					references.push(...fileReferences);
+				} else {
+					// 方法2: 如果反向链接API没有找到引用，回退到文本搜索
+					await this.fallbackToTextSearch(record, references);
+					totalReferences = references.length;
+				}
+			} catch (error) {
+				console.error(`Error using backlinks API for ${record.fileName}, falling back to text search:`, error);
+				// 如果反向链接API完全失败，使用文本搜索
+				await this.fallbackToTextSearch(record, references);
+				totalReferences = references.length;
+			}
+			
+			// 更新记录的引用信息
+			record.referenceCount = totalReferences;
+			record.references = references;
+			
+			return totalReferences;
+		} catch (error) {
+			console.error('Error updating single record reference count:', error);
+			return record.referenceCount || 0;
+		}
+	}
+	
+	// 批量更新多个记录的引用计数 - 使用高效的反向链接API
+	public async updateBatchRecordReferenceCounts(records: AttachmentRecord[]): Promise<number> {
+		try {
+			let totalUpdated = 0;
+			
+			// 并行处理多个记录，但限制并发数量避免过载
+			const batchSize = 5; // 同时处理5个记录
+			for (let i = 0; i < records.length; i += batchSize) {
+				const batch = records.slice(i, i + batchSize);
+				
+				// 并行处理当前批次的记录
+				const batchPromises = batch.map(async (record) => {
+					try {
+						const oldCount = record.referenceCount || 0;
+						const newCount = await this.updateSingleRecordReferenceCount(record);
+						return newCount !== oldCount ? 1 : 0;
+					} catch (error) {
+						console.error(`Error updating record ${record.id}:`, error);
+						return 0;
+					}
+				});
+				
+				const batchResults = await Promise.all(batchPromises);
+				totalUpdated += batchResults.reduce((sum, count) => sum + count, 0);
+				
+				// 让出控制权，避免阻塞UI
+				if (i + batchSize < records.length) {
+					await new Promise(resolve => setTimeout(resolve, 50));
+				}
+			}
+			
+			return totalUpdated;
+		} catch (error) {
+			console.error('Error updating batch record reference counts:', error);
+			return 0;
 		}
 	}
 

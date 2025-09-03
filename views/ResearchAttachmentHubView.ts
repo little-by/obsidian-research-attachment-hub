@@ -48,6 +48,22 @@ export class ResearchAttachmentHubView extends ItemView {
 	private selectedRecords: Set<string> = new Set(); // 选中的附件记录ID
 	private isSelectMode: boolean = false; // 是否处于选择模式
 	
+	// 分页相关属性
+	private currentPage: number = 1;
+	private pageSize: number = 15; // 每页显示15个附件，提高加载速度
+	private totalPages: number = 1;
+	
+	// 虚拟滚动相关属性
+	private virtualScrollEnabled: boolean = true;
+	private visibleStartIndex: number = 0;
+	private visibleEndIndex: number = 0;
+	private itemHeight: number = 40; // 每行高度
+	private containerHeight: number = 0;
+	
+	// 防抖相关属性
+	private refreshTimeout: NodeJS.Timeout | null = null;
+	private isRefreshing: boolean = false;
+	
 	// 列宽度配置
 	private minColumnWidths: { [key: string]: number } = {
 		title: 200,
@@ -84,23 +100,77 @@ export class ResearchAttachmentHubView extends ItemView {
 	}
 
 	async onOpen() {
-		// // console.log('ResearchAttachmentHubView opened');
-		await this.loadRecords();
-		// // console.log('Records loaded, updating references...');
-		
-		// 自动更新引用统计
-		try {
-			await this.plugin.updateAllReferenceCounts();
-			// console.log('References updated automatically');
-		} catch (error) {
-			console.error('Error updating references:', error);
-		}
-		
-		// console.log('Rendering...');
+		// 先渲染UI，让用户看到界面
 		this.render();
+		
+		// 异步加载记录，不阻塞UI
+		this.loadRecordsAsync();
 		
 		// 监听标签页激活事件
 		this.registerTabActivationListener();
+	}
+	
+	// 异步加载记录，避免阻塞UI
+	private async loadRecordsAsync() {
+		try {
+			await this.loadRecords();
+			// 不再自动更新引用计数，改为手动刷新
+		} catch (error) {
+			console.error('Error loading records:', error);
+		}
+	}
+	
+	// 刷新当前页的引用计数
+	private async refreshCurrentPageReferences() {
+		if (this.isRefreshing) {
+			return; // 防止重复执行
+		}
+		
+		this.isRefreshing = true;
+		
+		try {
+			// 获取当前页的记录
+			const startIndex = (this.currentPage - 1) * this.pageSize;
+			const endIndex = Math.min(startIndex + this.pageSize, this.filteredRecords.length);
+			const currentPageRecords = this.filteredRecords.slice(startIndex, endIndex);
+			
+			if (currentPageRecords.length === 0) {
+				return;
+			}
+			
+			// 更新状态栏
+			this.plugin.updateStatusBar(`正在刷新当前页引用计数... (${currentPageRecords.length} 个记录)`);
+			
+			// 使用高效的批量更新方法
+			const updatedCount = await this.plugin.updateBatchRecordReferenceCounts(currentPageRecords);
+			
+			// 保存更改
+			if (updatedCount > 0) {
+				await this.plugin.database.save();
+			}
+			
+			// 使用防抖机制刷新视图
+			this.debouncedRefreshView();
+			
+			this.plugin.updateStatusBar(`当前页引用计数刷新完成: ${updatedCount} 个记录已更新`);
+			
+		} catch (error) {
+			console.error('Error refreshing current page references:', error);
+			this.plugin.updateStatusBar('刷新引用计数失败');
+		} finally {
+			this.isRefreshing = false;
+		}
+	}
+	
+	// 防抖刷新视图
+	private debouncedRefreshView() {
+		if (this.refreshTimeout) {
+			clearTimeout(this.refreshTimeout);
+		}
+		
+		this.refreshTimeout = setTimeout(() => {
+			this.refreshContent();
+		}, 300); // 300ms防抖
 	}
 
 	async onClose() {
@@ -122,17 +192,136 @@ export class ResearchAttachmentHubView extends ItemView {
 			// 直接加载数据库中的记录，不自动生成示例数据
 			this.records = allRecords;
 			
-			this.applyFiltersAndSort();
-			
-			if (this.filteredRecords.length === 0) {
-				console.log('No records found in database');
-			}
-		} catch (error) {
-			console.error('Error loading records:', error);
-			this.records = [];
-			this.filteredRecords = [];
+					this.applyFiltersAndSort();
+		this.updatePagination();
+		
+		if (this.filteredRecords.length === 0) {
+			console.log('No records found in database');
 		}
+	} catch (error) {
+		console.error('Error loading records:', error);
+		this.records = [];
+		this.filteredRecords = [];
 	}
+}
+
+// 更新分页信息
+private updatePagination() {
+	this.totalPages = Math.max(1, Math.ceil(this.filteredRecords.length / this.pageSize));
+	if (this.currentPage > this.totalPages) {
+		this.currentPage = this.totalPages;
+	}
+}
+
+// 获取当前页的记录
+private getCurrentPageRecords(): AttachmentRecord[] {
+	const startIndex = (this.currentPage - 1) * this.pageSize;
+	const endIndex = startIndex + this.pageSize;
+	return this.filteredRecords.slice(startIndex, endIndex);
+}
+
+// 切换到指定页面
+private goToPage(page: number) {
+	if (page >= 1 && page <= this.totalPages) {
+		this.currentPage = page;
+		this.render();
+	}
+}
+
+// 创建分页控件
+private createPagination(container: HTMLElement) {
+	if (this.totalPages <= 1) return;
+	
+	const paginationContainer = container.createEl('div', { cls: 'pagination-container' });
+	paginationContainer.style.cssText = `
+		display: flex;
+		justify-content: center;
+		align-items: center;
+		gap: 8px;
+		margin: 20px 0;
+		padding: 10px;
+		background: var(--background-secondary);
+		border-radius: 8px;
+		border: 1px solid var(--background-modifier-border);
+	`;
+	
+	// 首页按钮
+	const firstBtn = paginationContainer.createEl('button', { text: '«' });
+	firstBtn.style.cssText = `
+		padding: 8px 12px;
+		border: 1px solid var(--background-modifier-border);
+		background: var(--background-primary);
+		color: var(--text-normal);
+		border-radius: 4px;
+		cursor: pointer;
+		font-size: 14px;
+	`;
+	firstBtn.addEventListener('click', () => this.goToPage(1));
+	
+	// 上一页按钮
+	const prevBtn = paginationContainer.createEl('button', { text: '‹' });
+	prevBtn.style.cssText = firstBtn.style.cssText;
+	prevBtn.addEventListener('click', () => this.goToPage(this.currentPage - 1));
+	
+	// 页码显示
+	const pageInfo = paginationContainer.createEl('span', { 
+		text: `${this.currentPage} / ${this.totalPages}` 
+	});
+	pageInfo.style.cssText = `
+		padding: 8px 16px;
+		font-size: 14px;
+		color: var(--text-normal);
+	`;
+	
+	// 下一页按钮
+	const nextBtn = paginationContainer.createEl('button', { text: '›' });
+	nextBtn.style.cssText = firstBtn.style.cssText;
+	nextBtn.addEventListener('click', () => this.goToPage(this.currentPage + 1));
+	
+	// 末页按钮
+	const lastBtn = paginationContainer.createEl('button', { text: '»' });
+	lastBtn.style.cssText = firstBtn.style.cssText;
+	lastBtn.addEventListener('click', () => this.goToPage(this.totalPages));
+	
+	// 页面大小选择器
+	const pageSizeContainer = paginationContainer.createEl('div', { cls: 'page-size-container' });
+	pageSizeContainer.style.cssText = `
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-left: 20px;
+	`;
+	
+	const pageSizeLabel = pageSizeContainer.createEl('span', { text: '每页:' });
+	pageSizeLabel.style.cssText = `
+		font-size: 12px;
+		color: var(--text-muted);
+	`;
+	
+	const pageSizeSelect = pageSizeContainer.createEl('select');
+	pageSizeSelect.style.cssText = `
+		padding: 4px 8px;
+		border: 1px solid var(--background-modifier-border);
+		background: var(--background-primary);
+		color: var(--text-normal);
+		border-radius: 4px;
+		font-size: 12px;
+	`;
+	
+	const pageSizes = [25, 50, 100, 200];
+	pageSizes.forEach(size => {
+		const option = pageSizeSelect.createEl('option', { text: size.toString(), value: size.toString() });
+		if (size === this.pageSize) option.selected = true;
+	});
+	
+	pageSizeSelect.addEventListener('change', (e) => {
+		const newPageSize = parseInt((e.target as HTMLSelectElement).value);
+		this.pageSize = newPageSize;
+		this.currentPage = 1;
+		this.updatePagination();
+		this.render();
+	});
+}
 
 
 
@@ -406,12 +595,10 @@ export class ResearchAttachmentHubView extends ItemView {
 			});
 
 			menu.addItem((item) => {
-				item.setTitle(this.plugin.languageManager.t('views.mainView.updateReferences'));
+				item.setTitle('刷新当前页引用计数');
 				item.setIcon('link');
 				item.onClick(async () => {
-					await this.plugin.updateAllReferenceCounts();
-					await this.loadRecords();
-					this.refreshContent();
+					await this.refreshCurrentPageReferences();
 				});
 			});
 
@@ -1291,8 +1478,7 @@ export class ResearchAttachmentHubView extends ItemView {
 		searchBox.style.borderRadius = '4px';
 		searchBox.addEventListener('input', (e) => {
 			this.searchQuery = (e.target as HTMLInputElement).value;
-			this.applyFiltersAndSort();
-			this.renderMainContent(this.contentEl.querySelector('.main-content') || this.contentEl);
+			this.applyFiltersAndSort(); // 防抖机制会自动刷新视图
 		});
 
 		// 标签过滤
@@ -1322,8 +1508,7 @@ export class ResearchAttachmentHubView extends ItemView {
 				} else {
 					this.filterTags = [];
 				}
-				this.applyFiltersAndSort();
-				this.renderMainContent(this.contentEl.querySelector('.main-content') || this.contentEl);
+				this.applyFiltersAndSort(); // 防抖机制会自动刷新视图
 			});
 		}
 
@@ -1354,8 +1539,7 @@ export class ResearchAttachmentHubView extends ItemView {
 				} else {
 					this.filterFileTypes = [];
 				}
-				this.applyFiltersAndSort();
-				this.renderMainContent(this.contentEl.querySelector('.main-content') || this.contentEl);
+				this.applyFiltersAndSort(); // 防抖机制会自动刷新视图
 			});
 		}
 
@@ -1391,8 +1575,7 @@ export class ResearchAttachmentHubView extends ItemView {
 		
 		sortSelect.addEventListener('change', (e) => {
 			this.sortBy = (e.target as HTMLSelectElement).value as any;
-			this.applyFiltersAndSort();
-			this.renderMainContent(this.contentEl.querySelector('.main-content') || this.contentEl);
+			this.applyFiltersAndSort(); // 防抖机制会自动刷新视图
 		});
 
 		// 排序顺序
@@ -1406,8 +1589,7 @@ export class ResearchAttachmentHubView extends ItemView {
 		orderBtn.style.boxSizing = 'border-box'; // 确保padding不会影响总高度
 		orderBtn.addEventListener('click', () => {
 			this.sortOrder = this.sortOrder === 'asc' ? 'desc' : 'asc';
-			this.applyFiltersAndSort();
-			this.renderMainContent(this.contentEl.querySelector('.main-content') || this.contentEl);
+			this.applyFiltersAndSort(); // 防抖机制会自动刷新视图
 			orderBtn.setText(this.sortOrder === 'asc' ? '↑' : '↓');
 		});
 	}
@@ -1485,10 +1667,9 @@ export class ResearchAttachmentHubView extends ItemView {
 
 		console.log('Rendering view:', this.currentView, 'with', this.filteredRecords.length, 'records');
 
-		// 添加当前视图的调试信息
+		// 添加当前视图的调试信息和操作按钮
 		const debugInfo = container.createEl('div', { 
 			cls: 'view-debug-info',
-			text: `当前视图: ${this.currentView} | 记录数: ${this.filteredRecords.length}` 
 		});
 		debugInfo.style.padding = '10px';
 		debugInfo.style.backgroundColor = 'var(--background-secondary)';
@@ -1496,6 +1677,30 @@ export class ResearchAttachmentHubView extends ItemView {
 		debugInfo.style.borderRadius = '5px';
 		debugInfo.style.fontSize = '12px';
 		debugInfo.style.color = 'var(--text-muted)';
+		debugInfo.style.display = 'flex';
+		debugInfo.style.justifyContent = 'space-between';
+		debugInfo.style.alignItems = 'center';
+		
+		// 左侧信息
+		const infoText = debugInfo.createEl('span', {
+			text: `当前视图: ${this.currentView} | 记录数: ${this.filteredRecords.length}`
+		});
+		
+		// 右侧操作按钮
+		const actionButtons = debugInfo.createEl('div', { cls: 'action-buttons' });
+		actionButtons.style.display = 'flex';
+		actionButtons.style.gap = '8px';
+		
+		// 手动刷新当前页引用计数按钮
+		const refreshRefsBtn = actionButtons.createEl('button', {
+			text: '刷新引用计数',
+			cls: 'mod-cta'
+		});
+		refreshRefsBtn.style.fontSize = '11px';
+		refreshRefsBtn.style.padding = '4px 8px';
+		refreshRefsBtn.addEventListener('click', async () => {
+			await this.refreshCurrentPageReferences();
+		});
 
 		switch (this.currentView) {
 			case 'table':
@@ -1509,6 +1714,11 @@ export class ResearchAttachmentHubView extends ItemView {
 				break;
 			default:
 				this.renderListView(container);
+		}
+		
+		// 添加分页控件（除了预览视图）
+		if (this.currentView !== 'preview') {
+			this.createPagination(container);
 		}
 	}
 
@@ -1531,6 +1741,9 @@ export class ResearchAttachmentHubView extends ItemView {
 		tableContainer.style.borderRadius = '5px';
 		tableContainer.style.border = '1px solid var(--background-modifier-border)';
 		tableContainer.style.maxHeight = 'calc(100vh - 400px)';
+		
+		// 设置容器高度用于虚拟滚动
+		this.containerHeight = tableContainer.offsetHeight || 600;
 		
 		// 创建响应式表格
 		const table = tableContainer.createEl('table', { cls: 'papers-table' });
@@ -1732,7 +1945,8 @@ export class ResearchAttachmentHubView extends ItemView {
 
 		// 表体
 		const tbody = table.createEl('tbody');
-		this.filteredRecords.forEach(record => {
+		const currentPageRecords = this.getCurrentPageRecords();
+		currentPageRecords.forEach(record => {
 			const row = tbody.createEl('tr');
 			row.style.borderBottom = '1px solid var(--background-modifier-border)';
 			row.style.minHeight = '60px';
@@ -2281,7 +2495,8 @@ export class ResearchAttachmentHubView extends ItemView {
 		cardsContainer.style.padding = '20px';
 		cardsContainer.style.boxSizing = 'border-box';
 
-		this.filteredRecords.forEach(record => {
+		const currentPageRecords = this.getCurrentPageRecords();
+		currentPageRecords.forEach(record => {
 			const card = cardsContainer.createEl('div', { cls: 'paper-card' });
 			card.style.backgroundColor = 'var(--background-secondary)';
 			card.style.borderRadius = '8px';
@@ -2588,6 +2803,22 @@ export class ResearchAttachmentHubView extends ItemView {
 	}
 
 	applyFiltersAndSort() {
+		// 清除之前的防抖定时器
+		if (this.refreshTimeout) {
+			clearTimeout(this.refreshTimeout);
+		}
+		
+		// 立即应用过滤和排序
+		this.doApplyFiltersAndSort();
+		
+		// 延迟刷新视图，避免频繁更新
+		this.refreshTimeout = setTimeout(() => {
+			this.refreshContent();
+		}, 300); // 300ms防抖
+	}
+	
+	// 实际执行过滤和排序的方法
+	private doApplyFiltersAndSort() {
 		let filteredRecords = [...this.records];
 
 		// 应用搜索过滤
@@ -2661,6 +2892,9 @@ export class ResearchAttachmentHubView extends ItemView {
 		});
 
 		this.filteredRecords = filteredRecords;
+		
+		// 更新分页信息
+		this.updatePagination();
 	}
 
 	async openPDF(record: AttachmentRecord) {
@@ -2965,23 +3199,8 @@ export class ResearchAttachmentHubView extends ItemView {
 			// 检查当前激活的标签页是否是 Research Attachment Hub
 			const activeLeaf = this.app.workspace.activeLeaf;
 			if (activeLeaf && activeLeaf.view instanceof ResearchAttachmentHubView) {
-				console.log('Research Attachment Hub tab activated, updating references...');
-				// 异步更新引用，避免阻塞UI
-				setTimeout(async () => {
-					try {
-						await this.plugin.updateAllReferenceCounts();
-						console.log('References updated on tab activation');
-						// 重新加载记录以显示更新后的引用计数
-						await this.loadRecords();
-						// 只重新渲染主要内容，保持当前视图状态
-						const mainContent = this.contentEl.querySelector('.main-content') as HTMLElement;
-						if (mainContent) {
-							this.renderMainContent(mainContent);
-						}
-					} catch (error) {
-						console.error('Error updating references on tab activation:', error);
-					}
-				}, 100); // 延迟100ms，确保标签页完全激活
+				console.log('Research Attachment Hub tab activated');
+				// 不再自动更新引用计数，改为手动刷新
 			}
 		};
 

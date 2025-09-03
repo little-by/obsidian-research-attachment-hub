@@ -11,6 +11,9 @@ export class AttachmentDatabase {
 	private app: App;
 	private plugin: ResearchAttachmentHubPlugin;
 	private records: Map<string, AttachmentRecord> = new Map();
+	private saveTimeout: NodeJS.Timeout | null = null; // 防抖保存
+	private pendingUpdates: Set<string> = new Set(); // 待更新的记录ID
+	private batchSaveTimeout: NodeJS.Timeout | null = null; // 批量保存定时器
 
 	constructor(app: App, plugin: any) {
 		this.app = app;
@@ -80,10 +83,13 @@ export class AttachmentDatabase {
 		return this.records.size;
 	}
 
-	// 更新记录
+	// 更新记录 - 优化版本，支持批量更新
 	async updateRecord(record: AttachmentRecord, skipMDUpdate: boolean = false): Promise<void> {
 		this.records.set(record.id, record);
-		await this.save();
+		this.pendingUpdates.add(record.id);
+		
+		// 使用防抖保存，避免频繁I/O操作
+		this.scheduleBatchSave();
 		
 		// 只有在不跳过MD更新时才自动更新对应的MD文件
 		if (!skipMDUpdate && this.plugin.attachmentTagManager) {
@@ -93,6 +99,22 @@ export class AttachmentDatabase {
 				console.error('Error updating MD file for record:', error);
 			}
 		}
+	}
+	
+	// 调度批量保存
+	private scheduleBatchSave() {
+		// 清除之前的定时器
+		if (this.batchSaveTimeout) {
+			clearTimeout(this.batchSaveTimeout);
+		}
+		
+		// 设置新的定时器，500ms后执行批量保存
+		this.batchSaveTimeout = setTimeout(async () => {
+			if (this.pendingUpdates.size > 0) {
+				await this.save();
+				this.pendingUpdates.clear();
+			}
+		}, 500);
 	}
 
 	// 批量添加记录（用于导入，避免频繁文件操作）
@@ -169,8 +191,38 @@ export class AttachmentDatabase {
 		return Array.from(tags).sort();
 	}
 
-	// 保存数据 - 使用Obsidian的Base功能
+	// 保存数据 - 使用Obsidian的Base功能，添加防抖机制
 	async save(): Promise<void> {
+		// 清除之前的保存定时器
+		if (this.saveTimeout) {
+			clearTimeout(this.saveTimeout);
+		}
+		
+		// 设置新的保存定时器，500ms后执行保存
+		this.saveTimeout = setTimeout(async () => {
+			try {
+				const data: AttachmentData = {
+					records: Array.from(this.records.values()),
+					lastUpdated: new Date().toISOString()
+				};
+				
+				// 使用Obsidian插件数据存储API
+				await this.plugin.saveData(data);
+			} catch (error) {
+				console.error('Failed to save database:', error);
+				new Notice(this.plugin.languageManager.t('notices.databaseSaveFailed'));
+			}
+		}, 500);
+	}
+	
+	// 立即保存数据（用于重要操作）
+	async saveImmediate(): Promise<void> {
+		// 清除防抖定时器
+		if (this.saveTimeout) {
+			clearTimeout(this.saveTimeout);
+			this.saveTimeout = null;
+		}
+		
 		try {
 			const data: AttachmentData = {
 				records: Array.from(this.records.values()),
