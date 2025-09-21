@@ -8,6 +8,7 @@ import { DownloadModal } from '../modals/DownloadModal';
 import { SearchModal } from '../modals/SearchModal';
 import { ScanAttachmentsModal } from '../modals/ScanAttachmentsModal';
 import { ImportPackageModal } from '../modals/ImportPackageModal';
+import { CreateMDFileModal } from '../modals/CreateMDFileModal';
 
 export const RESEARCH_ATTACHMENT_HUB_VIEW_TYPE = 'research-attachment-hub-view';
 
@@ -632,6 +633,19 @@ private createPagination(container: HTMLElement) {
 							this.refreshContent();
 						} catch (error) {
 							// new Notice(this.plugin.languageManager.t('views.mainView.mdFileSyncFailed', { message: error.message }));
+						}
+					});
+				});
+
+				menu.addItem((item) => {
+					item.setTitle('验证MD文件状态');
+					item.setIcon('check-circle');
+					item.onClick(async () => {
+						try {
+							await this.validateAllMDFileStatus();
+						} catch (error) {
+							console.error('Error validating MD file status:', error);
+							new Notice('验证MD文件状态失败');
 						}
 					});
 				});
@@ -1314,6 +1328,16 @@ private createPagination(container: HTMLElement) {
 			// 无MD文件
 			const mdStatus = mdFileItem.createEl('span', { text: this.plugin.languageManager.t('views.mainView.mdFileNotCreated') });
 			mdStatus.style.color = 'var(--text-muted)';
+			
+			// 添加点击事件，可以创建MD文件
+			mdFileItem.style.cursor = 'pointer';
+			mdFileItem.title = this.plugin.languageManager.t('views.mainView.mdFileNotCreatedClickToCreate');
+			mdFileItem.addEventListener('click', (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				console.log('预览视图MD文件创建按钮被点击:', record.title);
+				this.createMDFile(record);
+			});
 		}
 		mdFileItem.style.padding = '12px';
 		mdFileItem.style.backgroundColor = 'var(--background-primary)';
@@ -2237,7 +2261,16 @@ private createPagination(container: HTMLElement) {
 				noMdSpan.style.borderRadius = '3px';
 				noMdSpan.style.fontSize = '10px';
 				noMdSpan.style.fontWeight = 'bold';
-				noMdSpan.title = this.plugin.languageManager.t('views.mainView.noMDFile');
+				noMdSpan.title = this.plugin.languageManager.t('views.mainView.mdFileNotCreatedClickToCreate');
+				
+				// 添加点击事件，可以创建MD文件
+				noMdSpan.style.cursor = 'pointer';
+				noMdSpan.addEventListener('click', (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					console.log('MD文件创建按钮被点击:', record.title);
+					this.createMDFile(record);
+				});
 			}
 
 			// 文件大小
@@ -2648,6 +2681,16 @@ private createPagination(container: HTMLElement) {
 				const mdText = mdFileStatus.createEl('span', { text: this.plugin.languageManager.t('views.mainView.noMDFile') });
 				mdText.style.color = 'var(--text-muted)';
 				mdText.style.fontSize = '12px';
+				
+				// 添加点击事件，可以创建MD文件
+				mdFileStatus.style.cursor = 'pointer';
+				mdFileStatus.title = this.plugin.languageManager.t('views.mainView.mdFileNotCreatedClickToCreate');
+				mdFileStatus.addEventListener('click', (event) => {
+					event.preventDefault();
+					event.stopPropagation();
+					console.log('卡片视图MD文件创建按钮被点击:', record.title);
+					this.createMDFile(record);
+				});
 			}
 
 			// 文件类型和大小
@@ -3033,15 +3076,54 @@ private createPagination(container: HTMLElement) {
 	 * 创建MD文件
 	 */
 	private async createMDFile(record: AttachmentRecord): Promise<void> {
-		try {
-			await this.plugin.attachmentTagManager.createMDFile(record);
-			new Notice(`已为 ${record.title} 创建MD文件`);
-			// 刷新视图以显示更新后的状态
+		console.log('验证MD文件状态:', record.title);
+		
+		// 先验证并更新MD文件状态
+		const isValid = await this.plugin.attachmentTagManager.validateAndUpdateMDFileStatus(record);
+		
+		if (isValid) {
+			// 如果MD文件存在且有效，更新数据库并刷新视图
+			await this.plugin.database.updateRecord(record);
+			await this.loadRecords();
 			this.render();
-		} catch (error) {
-			console.error('Error creating MD file:', error);
-			new Notice(this.plugin.languageManager.t('views.mainView.createMDFileFailed', { message: error.message }));
+			console.log('MD文件状态已更新，视图已刷新');
+			return;
 		}
+		
+		// 如果MD文件不存在或无效，显示创建模态框
+		console.log('显示MD文件创建模态框:', record.title);
+		new CreateMDFileModal(this.app, this.plugin, record, async (updatedRecord) => {
+			// 刷新视图以显示更新后的状态
+			await this.loadRecords();
+			this.render();
+			console.log('MD文件创建完成，视图已刷新');
+		}).open();
+	}
+
+	/**
+	 * 验证所有MD文件状态
+	 */
+	private async validateAllMDFileStatus(): Promise<void> {
+		console.log('开始验证所有MD文件状态...');
+		const records = this.plugin.database.getAllRecords();
+		let updatedCount = 0;
+		
+		for (const record of records) {
+			const wasValid = record.hasMDFile;
+			const isValid = await this.plugin.attachmentTagManager.validateAndUpdateMDFileStatus(record);
+			
+			if (wasValid !== isValid) {
+				await this.plugin.database.updateRecord(record);
+				updatedCount++;
+			}
+		}
+		
+		// 刷新视图
+		await this.loadRecords();
+		this.render();
+		
+		new Notice(`MD文件状态验证完成，更新了 ${updatedCount} 个记录`);
+		console.log(`MD文件状态验证完成，更新了 ${updatedCount} 个记录`);
 	}
 
 	/**

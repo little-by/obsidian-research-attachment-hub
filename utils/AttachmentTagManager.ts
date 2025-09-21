@@ -861,6 +861,39 @@ export class AttachmentTagManager {
 	}
 
 	/**
+	 * 验证并更新MD文件状态
+	 */
+	async validateAndUpdateMDFileStatus(record: AttachmentRecord): Promise<boolean> {
+		try {
+			if (record.hasMDFile && record.mdFilePath) {
+				// 检查MD文件是否真的存在
+				const exists = await this.checkMDFileExists(record);
+				if (!exists) {
+					// 文件不存在，更新状态
+					record.hasMDFile = false;
+					record.mdFilePath = undefined;
+					record.mdLastSync = undefined;
+					record.mdFileLost = true;
+					console.log(`MD文件不存在，更新状态: ${record.title}`);
+					return false;
+				}
+				return true;
+			} else {
+				// 检查是否应该创建MD文件
+				if (this.shouldCreateMDFile(record)) {
+					// 尝试创建MD文件
+					await this.createMDFile(record, true);
+					return true;
+				}
+				return false;
+			}
+		} catch (error) {
+			console.error('Error validating MD file status:', error);
+			return false;
+		}
+	}
+
+	/**
 	 * 重新创建所有MD文件
 	 * 优化：添加批量操作和延迟，减少对 Obsidian 索引的影响
 	 */

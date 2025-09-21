@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-research-attachment-hub",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"description": "A comprehensive research attachment hub for Obsidian with PDF organization, DOI tracking, citation management, and academic paper management",
 	"main": "main.js",
 	"scripts": {

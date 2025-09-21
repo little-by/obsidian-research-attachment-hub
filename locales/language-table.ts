@@ -3110,6 +3110,16 @@ export const LANGUAGE_KEYS: TranslationTable = {
 		'ru-RU': 'Не создано',
 		'es-ES': 'No Creado'
 	},
+	'views.mainView.mdFileNotCreatedClickToCreate': {
+		'en-US': 'Click to create MD file',
+		'zh-CN': '点击创建MD文件',
+		'zh-TW': '點擊創建MD文件',
+		'ja-JP': 'クリックしてMDファイルを作成',
+		'de-DE': 'Klicken Sie, um MD-Datei zu erstellen',
+		'fr-FR': 'Cliquer pour créer le fichier MD',
+		'ru-RU': 'Нажмите для создания MD файла',
+		'es-ES': 'Hacer clic para crear archivo MD'
+	},
 	'views.mainView.fileInfo': {
 		'en-US': 'File Information',
 		'zh-CN': '文件信息',

@@ -132,7 +132,7 @@ export interface ReferenceInfo {
 	fileName: string;
 	lineNumber?: number;
 	context?: string; // 改为可选，暂时不实现异步上下文提取
-	referenceType: 'doi' | 'filename' | 'title' | 'author' | 'link';
+	referenceType: 'doi' | 'filename' | 'title' | 'author' | 'link' | 'embed';
 }
 
 export default class ResearchAttachmentHubPlugin extends Plugin {
@@ -1953,7 +1953,7 @@ importResearchAttachmentHub();
 
 			// 使用Obsidian的高效反向链接API
 			try {
-				const backlinks = this.app.metadataCache.getBacklinksForFile(attachmentFile);
+				const backlinks = (this.app.metadataCache as any).getBacklinksForFile(attachmentFile);
 				if (!backlinks) {
 					console.log(`No backlinks found for ${record.fileName}, falling back to text search`);
 					return references;
@@ -2260,7 +2260,7 @@ importResearchAttachmentHub();
 	}
 
 	// 更新状态栏显示
-	private updateStatusBar(customMessage?: string) {
+	public updateStatusBar(customMessage?: string) {
 		const statusBarItem = this.statusBarItemEl;
 		if (statusBarItem) {
 			if (customMessage) {
